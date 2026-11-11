@@ -1,0 +1,101 @@
+# 面向技术文档的 RAG 问答系统（FAISS + Rerank + 评测）
+
+> 技术栈：PyMuPDF（文档解析）→ bge-m3（向量化）→ FAISS（向量检索）→ bge-reranker-v2-m3（重排）→ DeepSeek-V3（生成）
+>
+> 完整链路：多格式加载 → **按 Markdown 标题层级切分（每块带章节路径）** → bge-m3 向量化 → FAISS 召回 Top-20 → Rerank 精排 Top-5 → 拼 Prompt → 生成带 `[文档名｜章节]` 引用的回答
+
+---
+
+## 第 1 步：拿 API Key（约 10 分钟）
+推荐「硅基流动」：https://siliconflow.cn
+- 注册（手机号）→ 控制台「API 密钥」→ 新建一个 key 复制下来
+- **注意**：免费额度有有效期，过期后余额为 0 会报 `402 account balance is insufficient`，充 10 元即可（这个项目跑完 + 面试演示，10 元足够）
+- 备选「智谱开放平台」：https://open.bigmodel.cn（glm-4-flash 免费，但没有 rerank 接口）
+
+## 第 2 步：配置
+把 `.env.example` 复制一份改名为 `.env`，把 `API_KEY=` 后面填上你的 key。
+`.env` 里已经配好模型型号（写死，方便写简历）：
+```
+EMBED_MODEL=BAAI/bge-m3
+CHAT_MODEL=deepseek-ai/DeepSeek-V3
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_BACKEND=api      # api=调硅基流动 /rerank（不用装 torch）；local=本地；off=关闭
+```
+
+## 第 3 步：安装依赖
+```
+pip install -r requirements.txt
+```
+（国内网慢就加镜像：`pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`）
+
+## 第 4 步：运行
+```
+python main.py
+```
+会自动读 `DOC_PATH` 指定的**文件或目录**（支持 `.pdf / .md / .mdx / .txt / .docx`，给目录就递归读整个知识库）→ **按 `#` 标题层级切块，每块记录「文档名 + 章节路径」** → 向量化 → 建 FAISS 索引，然后进入提问循环。
+
+> 默认 `DOC_PATH` 指向 `docs/`：**12 篇 FastAPI / LangChain 官方文档，约 15 万字符，切成 483 个块 / 196 个章节**。
+> 论文 PDF 已挪到 `_pdf_单文档版/`，想演示 PDF 单文档问答就把 `DOC_PATH` 指回那个文件。
+
+## 第 5 步：跑评测（面试亮点）
+```
+python eval.py
+```
+跑 `eval_set.json` 里的 20 条问题，输出：
+- `recall@5 仅向量召回`
+- `recall@5 召回+重排`
+- `recall@20 仅向量召回`（判断瓶颈在召回还是排序）
+- 来源正确率（命中块是否来自标注文档）、重排救回/误伤条数、rerank 单次耗时
+- 每条明细写入 `eval_result.json`
+
+**本机实测（2026-10-30，12 篇文档 / 483 个块 / 20 条评测题）：**
+- 仅向量召回（Top-5）：14/20 = **70%**
+- 召回 Top-20 + Rerank 精排 Top-5：16/20 = **80%**（+10 点）
+- 仅向量召回（Top-20）：16/20 = **80%**
+- 重排救回 2 条、**误伤 0 条**；rerank 单次（只计重排这步）平均约 **994 ms**（max 1691 ms）
+
+> **关键推理：recall@20 也是 80%，和重排后的 80% 完全相等 —— 说明没救回来的 4 条，答案压根没进候选集，瓶颈在「向量召回」而不是「排序」。**
+>
+> 这 4 条失败的共性是：问题问的是文档的「元信息」（如"教程组织上有什么好处""最简单的依赖长什么样"），中文提问、英文原文，纯语义向量抓不住这类抽象表述。
+>
+> **下一步（面试可讲）**：给每个块拼上「文档名 + 章节路径」再做 embedding（补上下文）；BM25 混合检索补关键词；query 改写成英文再检索。
+
+## 第 6 步：提问试试
+- “LangGraph 里短期记忆是怎么存的？” → 应命中 `langchain/concepts_memory｜Short-term memory`
+- “怎么让查询参数变成必填？” → 应命中 `fastapi/query-params｜Query Parameters > Required query parameters`
+- “FastAPI 里怎么定义路径参数？”
+- 注意看回答末尾的 `[资料N | 文档名｜章节]`——这就是“可溯源、降幻觉”。
+- 输入 `exit` 退出。
+
+---
+
+## 面试一定会问（答案都在 main.py 里）
+
+**基础 5 问**
+1. **RAG 是什么？为什么需要？** —— 大模型会“幻觉”、不知道私有文档；RAG 先检索相关片段，塞进 prompt，让模型“带着资料回答”。
+2. **为什么按标题切分，而不是固定长度切？** —— 技术文档本身有 `#` 层级，按标题切能让一个块只讲一件事，引用能精确到章节；固定 400 字符会把一个章节拦腰截断，检索到也说不清出处。超长段落再按 400 字符硬切，保留 60 字符重叠。
+3. **向量化是什么？** —— embedding 模型把文字变成高维向量，语义相近则向量相近。
+4. **为什么用余弦相似度？** —— 只看方向不看长度，适合文本；向量归一化后，内积就等于余弦，所以 FAISS 用 `IndexFlatIP`。
+5. **检索不准怎么办？** —— 调 chunk_size、换更强 embedding、加大 top_k、加 rerank、给块补上下文前缀、上 BM25 混合检索。
+
+**进阶 3 问（你比大多数应届生答得深的地方）**
+6. **为什么要 Rerank？** —— 向量召回是“粗排”，语义相似但不一定真正回答问题；rerank 用交叉编码器逐对打分（query+doc 一起编码），精度高但慢，所以只对 Top-20 做精排、取 Top-5（实测单次约 1s）。
+7. **为什么 rerank 只做 Top-20 而不是全部？** —— 交叉编码器是 O(N) 逐对计算，全量太慢；先用向量检索把候选压到 20 条，再精排，是“召回-精排”两段式的标准做法。
+8. **怎么证明你的 RAG 有效？** —— 20 条评测集（中文问题 + 英文原文证据串 + 源文档），算 recall@5 对比重排前后、recall@20 定位瓶颈，还查「命中块是否来自标注文档」。
+
+---
+
+## 文件说明
+| 文件 | 作用 |
+|---|---|
+| `main.py` | 主流程：加载/按标题切分/向量化/FAISS/重排/生成 |
+| `eval.py` | 评测脚本：recall@5（重排前后）+ recall@20 + 来源正确率 + rerank 耗时 |
+| `eval_set.json` | 20 条评测集（问题 + 证据串 + 源文档） |
+| `_verify_eval.py` | 离线自检：不调 API，验证切分结果与 20 条证据是否对得上（改评测集后先跑它） |
+| `_demo.py` | 跑两个固定问题，检查引用格式和回答质量 |
+| `docs/` | 知识库：12 篇 FastAPI / LangChain 官方文档，483 块 / 196 章节 |
+| `_pdf_单文档版/` | 毕业论文 PDF（原单文档版语料，演示 PDF 时用） |
+| `.env.example` | 配置模板 |
+| `requirements.txt` | 依赖 |
+| `问过的面试问题.md` | 实际跑过的问答记录 |
+| `面试准备笔记.md` | 项目相关面试话术 |

@@ -1,0 +1,9 @@
+openai
+python-dotenv
+pymupdf
+numpy
+requests
+faiss-cpu
+
+# 可选：本地重排（pip install sentence-transformers，会下载 torch，约 2GB）
+# sentence-transformers
